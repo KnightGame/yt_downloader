@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Universal Video Downloader</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="logo">
+                <span class="logo-icon">🎬</span>
+                <h1>Universal Video Downloader</h1>
+            </div>
+            <p class="subtitle">Download video & audio dari berbagai platform</p>
+            <div id="status-badges" class="status-badges">
+                <span class="badge loading" id="ytdlp-badge">yt-dlp: checking...</span>
+                <span class="badge loading" id="ffmpeg-badge">ffmpeg: checking...</span>
+            </div>
+        </header>
+
+        <main>
+            <!-- URL Input Section -->
+            <section class="input-section">
+                <div class="input-group">
+                    <input 
+                        type="text" 
+                        id="url-input" 
+                        placeholder="Paste URL video di sini (YouTube, TikTok, Instagram, dll)"
+                        autocomplete="off"
+                    >
+                    <button id="fetch-btn" class="btn btn-primary">
+                        <span class="btn-text">Ambil Info</span>
+                        <span class="btn-loading" style="display: none;">
+                            <div class="spinner"></div>
+                        </span>
+                    </button>
+                </div>
+                <p class="hint">Mendukung: YouTube, TikTok, Instagram, Twitter/X, Facebook, dan 1000+ situs lainnya</p>
+            </section>
+
+            <!-- Error Message -->
+            <div id="error-message" class="error-message" style="display: none;"></div>
+
+            <!-- Video Info Section -->
+            <section id="video-info" class="video-info" style="display: none;">
+                <div class="video-card">
+                    <div class="thumbnail-container">
+                        <img id="video-thumbnail" src="" alt="Thumbnail">
+                    </div>
+                    <div class="video-details">
+                        <h2 id="video-title"></h2>
+                        <p class="uploader">
+                            <span class="icon">👤</span>
+                            <span id="video-uploader"></span>
+                        </p>
+                        <div class="meta-info">
+                            <span class="platform" id="video-platform"></span>
+                            <span class="duration" id="video-duration"></span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Format Selection -->
+                <div class="format-selection">
+                    <div class="format-tabs">
+                        <button class="tab-btn active" data-tab="audio">
+                            <span class="icon">🎵</span> Audio (MP3)
+                        </button>
+                        <button class="tab-btn" data-tab="video">
+                            <span class="icon">🎬</span> Video (MP4)
+                        </button>
+                    </div>
+
+                    <!-- Audio Formats -->
+                    <div id="audio-formats" class="format-list active">
+                        <p class="format-hint">Pilih kualitas audio:</p>
+                        <div id="audio-options" class="options-grid"></div>
+                    </div>
+
+                    <!-- Video Formats -->
+                    <div id="video-formats" class="format-list">
+                        <p class="format-hint">Pilih kualitas video:</p>
+                        <div id="video-options" class="options-grid"></div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Download Progress Section -->
+            <section id="download-section" class="download-section" style="display: none;">
+                <div class="progress-container">
+                    <div class="progress-header">
+                        <span id="download-status">Memulai download...</span>
+                        <span id="download-percent">0%</span>
+                    </div>
+                    <div class="progress-bar">
+                        <div id="progress-fill" class="progress-fill" style="width: 0%"></div>
+                    </div>
+                </div>
+                <button id="download-file-btn" class="btn btn-success" style="display: none;">
+                    <span class="icon">📥</span> Download File
+                </button>
+            </section>
+        </main>
+
+        <footer>
+            <p>Powered by <a href="https://github.com/yt-dlp/yt-dlp" target="_blank">yt-dlp</a> & Flask</p>
+        </footer>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

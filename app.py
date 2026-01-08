@@ -4,7 +4,7 @@ import subprocess
 import json
 from pathlib import Path
 import uuid
-from threading import Thread
+from threading import Thread, Lock
 import time
 import logging
 import sys
@@ -26,8 +26,9 @@ app = Flask(__name__,
 DOWNLOAD_FOLDER = '/tmp/downloads'
 Path(DOWNLOAD_FOLDER).mkdir(exist_ok=True, parents=True)
 
-# Store download progress
+# Store download progress with thread safety
 download_progress = {}
+progress_lock = Lock()
 
 def check_dependencies():
     """Check yt-dlp dan ffmpeg"""
@@ -261,11 +262,12 @@ def download():
 def download_file(download_id, url, format_type, format_id, safe_title):
     """Background task untuk download"""
     try:
-        download_progress[download_id] = {
-            'status': 'downloading',
-            'progress': 0,
-            'message': 'Memulai download...'
-        }
+        with progress_lock:
+            download_progress[download_id] = {
+                'status': 'downloading',
+                'progress': 0,
+                'message': 'Memulai download...'
+            }
         
         if format_type == 'audio':
             output_file = os.path.join(DOWNLOAD_FOLDER, f"{download_id}_{safe_title}.mp3")
@@ -312,14 +314,15 @@ def download_file(download_id, url, format_type, format_id, safe_title):
         )
         
         for line in process.stdout:
-            logger.info(f"yt-dlp: {line.strip()}")
+            logger.info(f"yt-dlp [{download_id}]: {line.strip()}")
             if '[download]' in line and '%' in line:
                 try:
                     parts = line.split()
                     for part in parts:
                         if '%' in part:
                             progress = float(part.replace('%', ''))
-                            download_progress[download_id]['progress'] = min(progress, 99)
+                            with progress_lock:
+                                download_progress[download_id]['progress'] = min(progress, 99)
                             break
                 except:
                     pass
@@ -328,74 +331,103 @@ def download_file(download_id, url, format_type, format_id, safe_title):
         
         if process.returncode == 0 and os.path.exists(output_file):
             filesize = os.path.getsize(output_file)
-            download_progress[download_id] = {
-                'status': 'completed',
-                'progress': 100,
-                'message': 'Download selesai!',
-                'file': output_file,
-                'filename': os.path.basename(output_file),
-                'filesize': filesize
-            }
-            logger.info(f"Download completed: {download_id} ({filesize} bytes)")
+            with progress_lock:
+                download_progress[download_id] = {
+                    'status': 'completed',
+                    'progress': 100,
+                    'message': 'Download selesai!',
+                    'file': output_file,
+                    'filename': os.path.basename(output_file),
+                    'filesize': filesize
+                }
+            logger.info(f"Download completed: {download_id} ({filesize} bytes) -> {output_file}")
         else:
-            download_progress[download_id] = {
-                'status': 'error',
-                'progress': 0,
-                'message': f'Download gagal (exit code: {process.returncode})'
-            }
+            with progress_lock:
+                download_progress[download_id] = {
+                    'status': 'error',
+                    'progress': 0,
+                    'message': f'Download gagal (exit code: {process.returncode})'
+                }
             logger.error(f"Download failed: {download_id} (exit code: {process.returncode})")
             
     except Exception as e:
         logger.error(f"Error in download_file: {e}", exc_info=True)
-        download_progress[download_id] = {
-            'status': 'error',
-            'progress': 0,
-            'message': f'Error: {str(e)}'
-        }
+        with progress_lock:
+            download_progress[download_id] = {
+                'status': 'error',
+                'progress': 0,
+                'message': f'Error: {str(e)}'
+            }
 
 @app.route('/progress/<download_id>')
 def get_progress(download_id):
     """Dapatkan progress download"""
-    progress = download_progress.get(download_id, {
-        'status': 'not_found',
-        'progress': 0,
-        'message': 'Download tidak ditemukan'
-    })
+    with progress_lock:
+        progress = download_progress.get(download_id, {
+            'status': 'not_found',
+            'progress': 0,
+            'message': 'Download tidak ditemukan'
+        })
     return jsonify(progress)
 
 @app.route('/download-file/<download_id>')
 def download_file_route(download_id):
     """Download file yang sudah selesai"""
-    progress = download_progress.get(download_id)
+    with progress_lock:
+        progress = download_progress.get(download_id)
     
-    if not progress or progress['status'] != 'completed':
-        logger.warning(f"File not found for download_id: {download_id}")
-        return 'File tidak ditemukan', 404
+    if not progress:
+        logger.warning(f"Download ID not found: {download_id}")
+        return jsonify({'error': 'Download tidak ditemukan'}), 404
     
-    file_path = progress['file']
+    if progress['status'] != 'completed':
+        logger.warning(f"Download not completed: {download_id} (status: {progress['status']})")
+        return jsonify({'error': f'Download belum selesai (status: {progress["status"]})'}), 400
+    
+    file_path = progress.get('file')
+    
+    if not file_path:
+        logger.error(f"File path missing for download_id: {download_id}")
+        return jsonify({'error': 'Path file tidak ditemukan'}), 404
+    
+    # Validate file path
+    file_path = os.path.abspath(file_path)
+    download_folder_abs = os.path.abspath(DOWNLOAD_FOLDER)
+    
+    if not file_path.startswith(download_folder_abs):
+        logger.error(f"Security: File path outside download folder: {file_path}")
+        return jsonify({'error': 'Path tidak valid'}), 403
     
     if not os.path.exists(file_path):
-        logger.warning(f"File path does not exist: {file_path}")
-        return 'File tidak ditemukan', 404
+        logger.error(f"File does not exist: {file_path}")
+        return jsonify({'error': 'File tidak ditemukan di server'}), 404
+    
+    logger.info(f"Serving file: {file_path} ({os.path.getsize(file_path)} bytes)")
     
     def cleanup():
-        time.sleep(10)
+        time.sleep(60)  # Increased cleanup delay
         try:
             if os.path.exists(file_path):
                 os.remove(file_path)
                 logger.info(f"Cleaned up file: {file_path}")
-            if download_id in download_progress:
-                del download_progress[download_id]
+            with progress_lock:
+                if download_id in download_progress:
+                    del download_progress[download_id]
         except Exception as e:
             logger.error(f"Cleanup error: {e}")
     
     Thread(target=cleanup, daemon=True).start()
     
-    return send_file(
-        file_path,
-        as_attachment=True,
-        download_name=progress['filename']
-    )
+    try:
+        return send_file(
+            file_path,
+            as_attachment=True,
+            download_name=progress['filename'],
+            mimetype='application/octet-stream'
+        )
+    except Exception as e:
+        logger.error(f"Error sending file: {e}")
+        return jsonify({'error': f'Gagal mengirim file: {str(e)}'}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))

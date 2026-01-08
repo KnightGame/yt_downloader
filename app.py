@@ -1,4 +1,3 @@
-# app.py - Flask Backend (Modified for Railway)
 import os
 from flask import Flask, render_template, request, jsonify, send_file
 import subprocess
@@ -7,12 +6,17 @@ from pathlib import Path
 import uuid
 from threading import Thread
 import time
+import logging
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Konfigurasi - Gunakan /tmp untuk Railway (writable directory)
+# Konfigurasi - Gunakan /tmp untuk Railway
 DOWNLOAD_FOLDER = '/tmp/downloads'
-Path(DOWNLOAD_FOLDER).mkdir(exist_ok=True)
+Path(DOWNLOAD_FOLDER).mkdir(exist_ok=True, parents=True)
 
 # Store download progress
 download_progress = {}
@@ -23,16 +27,18 @@ def check_dependencies():
     ffmpeg_ok = False
     
     try:
-        subprocess.run(['yt-dlp', '--version'], capture_output=True, timeout=5)
-        ytdlp_ok = True
-    except:
-        pass
+        result = subprocess.run(['yt-dlp', '--version'], capture_output=True, timeout=5)
+        ytdlp_ok = result.returncode == 0
+        logger.info(f"yt-dlp check: {ytdlp_ok}")
+    except Exception as e:
+        logger.error(f"yt-dlp check failed: {e}")
     
     try:
-        subprocess.run(['ffmpeg', '-version'], capture_output=True, timeout=5)
-        ffmpeg_ok = True
-    except:
-        pass
+        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, timeout=5)
+        ffmpeg_ok = result.returncode == 0
+        logger.info(f"ffmpeg check: {ffmpeg_ok}")
+    except Exception as e:
+        logger.error(f"ffmpeg check failed: {e}")
     
     return ytdlp_ok, ffmpeg_ok
 
@@ -60,10 +66,13 @@ def get_info():
         if not url:
             return jsonify({'error': 'URL tidak boleh kosong'}), 400
         
+        logger.info(f"Fetching info for URL: {url}")
+        
         command = [
             'yt-dlp',
             '--dump-json',
             '--no-playlist',
+            '--no-warnings',
             url
         ]
         
@@ -75,15 +84,15 @@ def get_info():
         )
         
         if result.returncode != 0:
+            logger.error(f"yt-dlp error: {result.stderr}")
             return jsonify({'error': 'Gagal mengambil informasi video'}), 400
         
         info = json.loads(result.stdout)
         
         formats = info.get('formats', [])
         
+        # Extract audio formats
         audio_formats = []
-        video_formats = []
-        
         for fmt in formats:
             if fmt.get('vcodec') == 'none' and fmt.get('acodec') != 'none':
                 audio_formats.append({
@@ -94,10 +103,14 @@ def get_info():
                     'note': fmt.get('format_note', '')
                 })
         
+        # Extract video formats (unique by height)
         seen = {}
         for fmt in formats:
             if fmt.get('vcodec') != 'none':
                 height = fmt.get('height', 0)
+                if height == 0:
+                    continue
+                    
                 key = f"{height}p"
                 
                 if key not in seen or (fmt.get('filesize', 0) or 0) > (seen[key].get('filesize', 0) or 0):
@@ -113,7 +126,7 @@ def get_info():
                     }
         
         video_formats = sorted(seen.values(), key=lambda x: x['height'], reverse=True)
-        audio_formats.sort(key=lambda x: x['abr'], reverse=True)
+        audio_formats.sort(key=lambda x: x['abr'] or 0, reverse=True)
         
         response = {
             'title': info.get('title', 'Unknown'),
@@ -125,11 +138,17 @@ def get_info():
             'video_formats': video_formats[:15]
         }
         
+        logger.info(f"Successfully fetched info: {response['title']}")
         return jsonify(response)
         
     except subprocess.TimeoutExpired:
+        logger.error("Timeout when fetching info")
         return jsonify({'error': 'Timeout saat mengambil informasi'}), 408
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON decode error: {e}")
+        return jsonify({'error': 'Format respons tidak valid'}), 500
     except Exception as e:
+        logger.error(f"Error in get_info: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
 @app.route('/download', methods=['POST'])
@@ -147,13 +166,17 @@ def download():
         
         download_id = str(uuid.uuid4())
         
+        # Sanitize filename
         safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()
         safe_title = safe_title[:100] or 'download'
+        
+        logger.info(f"Starting download {download_id}: {safe_title}")
         
         thread = Thread(
             target=download_file,
             args=(download_id, url, format_type, format_id, safe_title)
         )
+        thread.daemon = True
         thread.start()
         
         return jsonify({
@@ -162,6 +185,7 @@ def download():
         })
         
     except Exception as e:
+        logger.error(f"Error in download: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
 def download_file(download_id, url, format_type, format_id, safe_title):
@@ -185,6 +209,7 @@ def download_file(download_id, url, format_type, format_id, safe_title):
                 '-o', output_file,
                 '--no-playlist',
                 '--newline',
+                '--no-warnings',
                 url
             ]
         else:
@@ -197,8 +222,11 @@ def download_file(download_id, url, format_type, format_id, safe_title):
                 '-o', output_file,
                 '--no-playlist',
                 '--newline',
+                '--no-warnings',
                 url
             ]
+        
+        logger.info(f"Running command: {' '.join(command)}")
         
         process = subprocess.Popen(
             command,
@@ -232,14 +260,17 @@ def download_file(download_id, url, format_type, format_id, safe_title):
                 'filename': os.path.basename(output_file),
                 'filesize': filesize
             }
+            logger.info(f"Download completed: {download_id}")
         else:
             download_progress[download_id] = {
                 'status': 'error',
                 'progress': 0,
                 'message': 'Download gagal'
             }
+            logger.error(f"Download failed: {download_id}")
             
     except Exception as e:
+        logger.error(f"Error in download_file: {e}", exc_info=True)
         download_progress[download_id] = {
             'status': 'error',
             'progress': 0,
@@ -276,10 +307,10 @@ def download_file_route(download_id):
                 os.remove(file_path)
             if download_id in download_progress:
                 del download_progress[download_id]
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Cleanup error: {e}")
     
-    Thread(target=cleanup).start()
+    Thread(target=cleanup, daemon=True).start()
     
     return send_file(
         file_path,
@@ -287,6 +318,12 @@ def download_file_route(download_id):
         download_name=progress['filename']
     )
 
+@app.route('/health')
+def health():
+    """Health check endpoint"""
+    return jsonify({'status': 'ok'}), 200
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
+    logger.info(f"Starting app on port {port}")
     app.run(debug=False, host='0.0.0.0', port=port)

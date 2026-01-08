@@ -15,14 +15,18 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Update yt-dlp ke versi terbaru
+RUN pip install --no-cache-dir --upgrade yt-dlp
+
 # Copy semua file project
 COPY . .
 
 # Buat folder downloads
 RUN mkdir -p /tmp/downloads
 
-# Expose port
-EXPOSE 8080
+# Expose port (Railway akan set PORT env variable)
+EXPOSE $PORT
 
 # Jalankan aplikasi dengan PORT dari Railway
-CMD gunicorn app:app --bind 0.0.0.0:${PORT:-8080}
+# Railway otomatis set PORT environment variable
+CMD gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120 --log-level info

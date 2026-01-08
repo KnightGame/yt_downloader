@@ -1,9 +1,10 @@
 # Gunakan Python base image
 FROM python:3.11-slim
 
-# Install ffmpeg dan dependencies sistem
+# Install ffmpeg dan dependencies sistem untuk thumbnail embedding
 RUN apt-get update && apt-get install -y \
     ffmpeg \
+    atomicparsley \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory

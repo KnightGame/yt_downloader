@@ -270,7 +270,10 @@ def download_file(download_id, url, format_type, format_id, safe_title):
             }
         
         if format_type == 'audio':
-            output_file = os.path.join(DOWNLOAD_FOLDER, f"{download_id}_{safe_title}.mp3")
+            # File internal dengan UUID untuk uniqueness
+            temp_file = os.path.join(DOWNLOAD_FOLDER, f"{download_id}_temp.mp3")
+            # Nama file untuk user tanpa UUID
+            final_filename = f"{safe_title}.mp3"
             
             command = [
                 'yt-dlp',
@@ -278,14 +281,19 @@ def download_file(download_id, url, format_type, format_id, safe_title):
                 '--extract-audio',
                 '--audio-format', 'mp3',
                 '--audio-quality', '0',
-                '-o', output_file,
+                '--embed-thumbnail',  # Embed thumbnail ke MP3
+                '--add-metadata',     # Tambah metadata
+                '-o', temp_file,
                 '--no-playlist',
                 '--newline',
                 '--no-warnings',
                 url
             ]
         else:
-            output_file = os.path.join(DOWNLOAD_FOLDER, f"{download_id}_{safe_title}.mp4")
+            # File internal dengan UUID untuk uniqueness
+            temp_file = os.path.join(DOWNLOAD_FOLDER, f"{download_id}_temp.mp4")
+            # Nama file untuk user tanpa UUID
+            final_filename = f"{safe_title}.mp4"
             
             if format_id == 'best':
                 format_str = 'best'
@@ -296,7 +304,9 @@ def download_file(download_id, url, format_type, format_id, safe_title):
                 'yt-dlp',
                 '-f', format_str,
                 '--merge-output-format', 'mp4',
-                '-o', output_file,
+                '--embed-thumbnail',  # Embed thumbnail ke MP4
+                '--add-metadata',     # Tambah metadata
+                '-o', temp_file,
                 '--no-playlist',
                 '--newline',
                 '--no-warnings',
@@ -329,18 +339,18 @@ def download_file(download_id, url, format_type, format_id, safe_title):
         
         process.wait()
         
-        if process.returncode == 0 and os.path.exists(output_file):
-            filesize = os.path.getsize(output_file)
+        if process.returncode == 0 and os.path.exists(temp_file):
+            filesize = os.path.getsize(temp_file)
             with progress_lock:
                 download_progress[download_id] = {
                     'status': 'completed',
                     'progress': 100,
                     'message': 'Download selesai!',
-                    'file': output_file,
-                    'filename': os.path.basename(output_file),
+                    'file': temp_file,  # Path internal dengan UUID
+                    'filename': final_filename,  # Nama file untuk user (tanpa UUID)
                     'filesize': filesize
                 }
-            logger.info(f"Download completed: {download_id} ({filesize} bytes) -> {output_file}")
+            logger.info(f"Download completed: {download_id} ({filesize} bytes) -> {temp_file} (as {final_filename})")
         else:
             with progress_lock:
                 download_progress[download_id] = {

@@ -7,14 +7,22 @@ import uuid
 from threading import Thread
 import time
 import logging
+import sys
 
 # Setup logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
+app = Flask(__name__, 
+            static_folder='static',
+            static_url_path='/static',
+            template_folder='templates')
 
-# Konfigurasi - Gunakan /tmp untuk Railway
+# Konfigurasi
 DOWNLOAD_FOLDER = '/tmp/downloads'
 Path(DOWNLOAD_FOLDER).mkdir(exist_ok=True, parents=True)
 
@@ -27,29 +35,58 @@ def check_dependencies():
     ffmpeg_ok = False
     
     try:
-        result = subprocess.run(['yt-dlp', '--version'], capture_output=True, timeout=5)
+        result = subprocess.run(['yt-dlp', '--version'], 
+                              capture_output=True, 
+                              timeout=5,
+                              text=True)
         ytdlp_ok = result.returncode == 0
-        logger.info(f"yt-dlp check: {ytdlp_ok}")
+        if ytdlp_ok:
+            logger.info(f"yt-dlp version: {result.stdout.strip()}")
+        else:
+            logger.error(f"yt-dlp check failed: {result.stderr}")
+    except FileNotFoundError:
+        logger.error("yt-dlp not found in PATH")
     except Exception as e:
-        logger.error(f"yt-dlp check failed: {e}")
+        logger.error(f"yt-dlp check error: {e}")
     
     try:
-        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, timeout=5)
+        result = subprocess.run(['ffmpeg', '-version'], 
+                              capture_output=True, 
+                              timeout=5,
+                              text=True)
         ffmpeg_ok = result.returncode == 0
-        logger.info(f"ffmpeg check: {ffmpeg_ok}")
+        if ffmpeg_ok:
+            version_line = result.stdout.split('\n')[0]
+            logger.info(f"ffmpeg: {version_line}")
+        else:
+            logger.error(f"ffmpeg check failed: {result.stderr}")
+    except FileNotFoundError:
+        logger.error("ffmpeg not found in PATH")
     except Exception as e:
-        logger.error(f"ffmpeg check failed: {e}")
+        logger.error(f"ffmpeg check error: {e}")
     
     return ytdlp_ok, ffmpeg_ok
 
 @app.route('/')
 def index():
     """Halaman utama"""
+    logger.info("Serving index page")
     return render_template('index.html')
+
+@app.route('/health')
+def health():
+    """Health check endpoint"""
+    ytdlp, ffmpeg = check_dependencies()
+    return jsonify({
+        'status': 'ok',
+        'ytdlp': ytdlp,
+        'ffmpeg': ffmpeg
+    }), 200
 
 @app.route('/check-dependencies')
 def check_deps():
     """Check dependencies"""
+    logger.info("Checking dependencies...")
     ytdlp, ffmpeg = check_dependencies()
     return jsonify({
         'ytdlp': ytdlp,
@@ -61,72 +98,107 @@ def get_info():
     """Dapatkan info video dari URL"""
     try:
         data = request.json
-        url = data.get('url')
+        url = data.get('url', '').strip()
         
         if not url:
             return jsonify({'error': 'URL tidak boleh kosong'}), 400
         
         logger.info(f"Fetching info for URL: {url}")
         
+        # Update yt-dlp sebelum fetch
+        try:
+            subprocess.run(['yt-dlp', '-U'], capture_output=True, timeout=10)
+        except:
+            pass
+        
         command = [
             'yt-dlp',
             '--dump-json',
             '--no-playlist',
             '--no-warnings',
+            '--skip-download',
             url
         ]
+        
+        logger.info(f"Running: {' '.join(command)}")
         
         result = subprocess.run(
             command,
             capture_output=True,
             text=True,
-            timeout=30
+            timeout=45
         )
         
         if result.returncode != 0:
-            logger.error(f"yt-dlp error: {result.stderr}")
-            return jsonify({'error': 'Gagal mengambil informasi video'}), 400
+            error_msg = result.stderr or result.stdout
+            logger.error(f"yt-dlp error (code {result.returncode}): {error_msg}")
+            return jsonify({'error': f'Gagal mengambil informasi video: {error_msg[:200]}'}), 400
         
-        info = json.loads(result.stdout)
+        if not result.stdout.strip():
+            logger.error("Empty response from yt-dlp")
+            return jsonify({'error': 'Respons kosong dari yt-dlp'}), 400
+        
+        try:
+            info = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error: {e}")
+            logger.error(f"Output: {result.stdout[:500]}")
+            return jsonify({'error': 'Format respons tidak valid'}), 500
         
         formats = info.get('formats', [])
+        logger.info(f"Found {len(formats)} formats")
         
         # Extract audio formats
         audio_formats = []
         for fmt in formats:
             if fmt.get('vcodec') == 'none' and fmt.get('acodec') != 'none':
+                abr = fmt.get('abr') or fmt.get('tbr') or 0
                 audio_formats.append({
                     'id': fmt.get('format_id'),
-                    'ext': fmt.get('ext'),
-                    'abr': fmt.get('abr', 0),
+                    'ext': fmt.get('ext', 'unknown'),
+                    'abr': round(abr) if abr else 0,
                     'filesize': fmt.get('filesize') or fmt.get('filesize_approx'),
                     'note': fmt.get('format_note', '')
                 })
         
-        # Extract video formats (unique by height)
+        # Extract video formats
         seen = {}
         for fmt in formats:
-            if fmt.get('vcodec') != 'none':
+            if fmt.get('vcodec') != 'none' and fmt.get('vcodec') != 'unknown':
                 height = fmt.get('height', 0)
-                if height == 0:
+                if not height or height < 144:
                     continue
                     
                 key = f"{height}p"
+                filesize = fmt.get('filesize') or fmt.get('filesize_approx') or 0
                 
-                if key not in seen or (fmt.get('filesize', 0) or 0) > (seen[key].get('filesize', 0) or 0):
+                if key not in seen or filesize > (seen[key].get('filesize') or 0):
                     seen[key] = {
                         'id': fmt.get('format_id'),
-                        'ext': fmt.get('ext'),
-                        'resolution': fmt.get('resolution', 'Unknown'),
-                        'fps': fmt.get('fps', 0),
+                        'ext': fmt.get('ext', 'mp4'),
+                        'resolution': fmt.get('resolution', f'{height}p'),
+                        'fps': fmt.get('fps', 30),
                         'height': height,
                         'has_audio': fmt.get('acodec') != 'none',
-                        'filesize': fmt.get('filesize') or fmt.get('filesize_approx'),
+                        'filesize': filesize,
                         'note': fmt.get('format_note', '')
                     }
         
         video_formats = sorted(seen.values(), key=lambda x: x['height'], reverse=True)
-        audio_formats.sort(key=lambda x: x['abr'] or 0, reverse=True)
+        audio_formats.sort(key=lambda x: x.get('abr', 0), reverse=True)
+        
+        # Fallback jika tidak ada format
+        if not audio_formats and not video_formats:
+            logger.warning("No suitable formats found, using best quality")
+            return jsonify({
+                'title': info.get('title', 'Unknown'),
+                'uploader': info.get('uploader', 'Unknown'),
+                'duration': info.get('duration', 0),
+                'thumbnail': info.get('thumbnail'),
+                'platform': info.get('extractor', 'Unknown'),
+                'audio_formats': [{'id': 'bestaudio', 'ext': 'mp3', 'abr': 128, 'filesize': None, 'note': 'Best'}],
+                'video_formats': [{'id': 'best', 'ext': 'mp4', 'height': 720, 'filesize': None, 'note': 'Best'}]
+            })
         
         response = {
             'title': info.get('title', 'Unknown'),
@@ -134,29 +206,27 @@ def get_info():
             'duration': info.get('duration', 0),
             'thumbnail': info.get('thumbnail'),
             'platform': info.get('extractor', 'Unknown'),
-            'audio_formats': audio_formats[:10],
-            'video_formats': video_formats[:15]
+            'audio_formats': audio_formats[:10] if audio_formats else [{'id': 'bestaudio', 'ext': 'mp3', 'abr': 128, 'filesize': None}],
+            'video_formats': video_formats[:15] if video_formats else [{'id': 'best', 'ext': 'mp4', 'height': 720, 'filesize': None}]
         }
         
-        logger.info(f"Successfully fetched info: {response['title']}")
+        logger.info(f"Successfully fetched: {response['title']}")
+        logger.info(f"Audio formats: {len(response['audio_formats'])}, Video formats: {len(response['video_formats'])}")
         return jsonify(response)
         
     except subprocess.TimeoutExpired:
         logger.error("Timeout when fetching info")
-        return jsonify({'error': 'Timeout saat mengambil informasi'}), 408
-    except json.JSONDecodeError as e:
-        logger.error(f"JSON decode error: {e}")
-        return jsonify({'error': 'Format respons tidak valid'}), 500
+        return jsonify({'error': 'Timeout - URL terlalu lama diproses (45 detik)'}), 408
     except Exception as e:
         logger.error(f"Error in get_info: {e}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': f'Error: {str(e)}'}), 500
 
 @app.route('/download', methods=['POST'])
 def download():
     """Download video/audio"""
     try:
         data = request.json
-        url = data.get('url')
+        url = data.get('url', '').strip()
         format_type = data.get('type')
         format_id = data.get('format_id')
         title = data.get('title', 'download')
@@ -170,13 +240,13 @@ def download():
         safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()
         safe_title = safe_title[:100] or 'download'
         
-        logger.info(f"Starting download {download_id}: {safe_title}")
+        logger.info(f"Starting download {download_id}: {safe_title} ({format_type}, format={format_id})")
         
         thread = Thread(
             target=download_file,
-            args=(download_id, url, format_type, format_id, safe_title)
+            args=(download_id, url, format_type, format_id, safe_title),
+            daemon=True
         )
-        thread.daemon = True
         thread.start()
         
         return jsonify({
@@ -202,7 +272,7 @@ def download_file(download_id, url, format_type, format_id, safe_title):
             
             command = [
                 'yt-dlp',
-                '-f', format_id,
+                '-f', format_id if format_id != 'bestaudio' else 'bestaudio',
                 '--extract-audio',
                 '--audio-format', 'mp3',
                 '--audio-quality', '0',
@@ -215,9 +285,14 @@ def download_file(download_id, url, format_type, format_id, safe_title):
         else:
             output_file = os.path.join(DOWNLOAD_FOLDER, f"{download_id}_{safe_title}.mp4")
             
+            if format_id == 'best':
+                format_str = 'best'
+            else:
+                format_str = f'{format_id}+bestaudio/best'
+            
             command = [
                 'yt-dlp',
-                '-f', f'{format_id}+bestaudio/best',
+                '-f', format_str,
                 '--merge-output-format', 'mp4',
                 '-o', output_file,
                 '--no-playlist',
@@ -226,7 +301,7 @@ def download_file(download_id, url, format_type, format_id, safe_title):
                 url
             ]
         
-        logger.info(f"Running command: {' '.join(command)}")
+        logger.info(f"Download command: {' '.join(command)}")
         
         process = subprocess.Popen(
             command,
@@ -237,13 +312,14 @@ def download_file(download_id, url, format_type, format_id, safe_title):
         )
         
         for line in process.stdout:
+            logger.info(f"yt-dlp: {line.strip()}")
             if '[download]' in line and '%' in line:
                 try:
                     parts = line.split()
                     for part in parts:
                         if '%' in part:
                             progress = float(part.replace('%', ''))
-                            download_progress[download_id]['progress'] = progress
+                            download_progress[download_id]['progress'] = min(progress, 99)
                             break
                 except:
                     pass
@@ -260,21 +336,21 @@ def download_file(download_id, url, format_type, format_id, safe_title):
                 'filename': os.path.basename(output_file),
                 'filesize': filesize
             }
-            logger.info(f"Download completed: {download_id}")
+            logger.info(f"Download completed: {download_id} ({filesize} bytes)")
         else:
             download_progress[download_id] = {
                 'status': 'error',
                 'progress': 0,
-                'message': 'Download gagal'
+                'message': f'Download gagal (exit code: {process.returncode})'
             }
-            logger.error(f"Download failed: {download_id}")
+            logger.error(f"Download failed: {download_id} (exit code: {process.returncode})")
             
     except Exception as e:
         logger.error(f"Error in download_file: {e}", exc_info=True)
         download_progress[download_id] = {
             'status': 'error',
             'progress': 0,
-            'message': str(e)
+            'message': f'Error: {str(e)}'
         }
 
 @app.route('/progress/<download_id>')
@@ -293,18 +369,21 @@ def download_file_route(download_id):
     progress = download_progress.get(download_id)
     
     if not progress or progress['status'] != 'completed':
+        logger.warning(f"File not found for download_id: {download_id}")
         return 'File tidak ditemukan', 404
     
     file_path = progress['file']
     
     if not os.path.exists(file_path):
+        logger.warning(f"File path does not exist: {file_path}")
         return 'File tidak ditemukan', 404
     
     def cleanup():
-        time.sleep(5)
+        time.sleep(10)
         try:
             if os.path.exists(file_path):
                 os.remove(file_path)
+                logger.info(f"Cleaned up file: {file_path}")
             if download_id in download_progress:
                 del download_progress[download_id]
         except Exception as e:
@@ -318,12 +397,14 @@ def download_file_route(download_id):
         download_name=progress['filename']
     )
 
-@app.route('/health')
-def health():
-    """Health check endpoint"""
-    return jsonify({'status': 'ok'}), 200
-
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    logger.info(f"Starting app on port {port}")
+    logger.info(f"Starting Universal Video Downloader on port {port}")
+    logger.info(f"Python version: {sys.version}")
+    logger.info(f"Download folder: {DOWNLOAD_FOLDER}")
+    
+    # Check dependencies on startup
+    ytdlp, ffmpeg = check_dependencies()
+    logger.info(f"Dependencies - yt-dlp: {ytdlp}, ffmpeg: {ffmpeg}")
+    
     app.run(debug=False, host='0.0.0.0', port=port)
